@@ -3,6 +3,8 @@ import { supabase } from './supabaseClient'
 
 const PALETTE = ['#4FD1B8', '#D4A054', '#6E93A8', '#A98BC4', '#8FAE8B', '#E8746B', '#C9A876', '#5FA8D3']
 
+const ACCOUNT_TYPE_LABEL = { checking: 'Checking', savings: 'Savings', brokerage: 'Brokerage', other: 'Other' }
+
 function fmtMoney(n, cents = false) {
   if (n === null || n === undefined || isNaN(n)) n = 0
   const sign = n < 0 ? '-' : ''
@@ -21,7 +23,9 @@ function formatRelativeTime(ts) {
   if (mins === 1) return '1 min ago'
   if (mins < 60) return mins + ' min ago'
   const hrs = Math.floor(mins / 60)
-  return hrs + (hrs === 1 ? ' hr ago' : ' hrs ago')
+  if (hrs < 24) return hrs + (hrs === 1 ? ' hr ago' : ' hrs ago')
+  const days = Math.floor(hrs / 24)
+  return days + (days === 1 ? ' day ago' : ' days ago')
 }
 
 // Debounce a save so we don't fire a write on every keystroke.
@@ -113,9 +117,9 @@ function AuthScreen() {
 }
 
 function Dashboard({ session }) {
-  const [cashBalance, setCashBalance] = useState('100000')
   const [fractional, setFractional] = useState(false)
-  const [positions, setPositions] = useState([])
+  const [accounts, setAccounts] = useState([]) // ca_accounts rows, cash_balance kept as string for editing
+  const [positions, setPositions] = useState([]) // ca_positions rows, all accounts, flat
   const [prices, setPrices] = useState({}) // ticker -> { price, updated_at, error }
   const [loaded, setLoaded] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -150,11 +154,17 @@ function Dashboard({ session }) {
       if (!settings) {
         const { data: created } = await supabase
           .from('ca_settings')
-          .insert({ user_id: userId, cash_balance: 100000, fractional_shares: false })
+          .insert({ user_id: userId, fractional_shares: false })
           .select()
           .single()
         settings = created
       }
+
+      const { data: acctRows } = await supabase
+        .from('ca_accounts')
+        .select('*')
+        .eq('user_id', userId)
+        .order('sort_order', { ascending: true })
 
       const { data: posRows } = await supabase
         .from('ca_positions')
@@ -170,8 +180,8 @@ function Dashboard({ session }) {
       }
 
       if (cancelled) return
-      setCashBalance(String(settings.cash_balance ?? 100000))
       setFractional(!!settings.fractional_shares)
+      setAccounts((acctRows || []).map((a) => ({ ...a, cash_balance: String(a.cash_balance ?? 0) })))
       setPositions(posRows || [])
       const priceMap = {}
       priceRows.forEach((p) => { priceMap[p.ticker] = p })
@@ -203,26 +213,32 @@ function Dashboard({ session }) {
   }, [])
 
   // --- debounced writes ---
-  const saveSettings = useDebouncedCallback(async (cash, frac) => {
-    await supabase
-      .from('ca_settings')
-      .update({ cash_balance: parseFloat(cash) || 0, fractional_shares: frac })
-      .eq('user_id', userId)
+  const saveFractional = useDebouncedCallback(async (frac) => {
+    await supabase.from('ca_settings').update({ fractional_shares: frac }).eq('user_id', userId)
+  }, 500)
+
+  const saveAccountCash = useDebouncedCallback(async (accountId, cash) => {
+    await supabase.from('ca_accounts').update({ cash_balance: parseFloat(cash) || 0 }).eq('id', accountId)
   }, 500)
 
   const savePosition = useDebouncedCallback(async (id, fields) => {
     await supabase.from('ca_positions').update(fields).eq('id', id)
   }, 500)
 
-  function onCashChange(v) {
-    const cleaned = v.replace(/[^0-9.]/g, '')
-    setCashBalance(cleaned)
-    saveSettings(cleaned, fractional)
-  }
-
   function onFractionalToggle(checked) {
     setFractional(checked)
-    saveSettings(cashBalance, checked)
+    saveFractional(checked)
+  }
+
+  function onAccountCashChange(accountId, v) {
+    const cleaned = v.replace(/[^0-9.]/g, '')
+    setAccounts((prev) => prev.map((a) => (a.id === accountId ? { ...a, cash_balance: cleaned } : a)))
+    saveAccountCash(accountId, cleaned)
+  }
+
+  async function onAccountAllocateToggle(accountId, checked) {
+    setAccounts((prev) => prev.map((a) => (a.id === accountId ? { ...a, allocate: checked } : a)))
+    await supabase.from('ca_accounts').update({ allocate: checked }).eq('id', accountId)
   }
 
   function updatePositionLocal(id, field, value) {
@@ -230,10 +246,11 @@ function Dashboard({ session }) {
     savePosition(id, { [field]: field === 'ticker' ? value.toUpperCase() : value })
   }
 
-  async function addPosition() {
+  async function addPosition(accountId) {
+    const sameAccount = positions.filter((p) => p.account_id === accountId)
     const { data } = await supabase
       .from('ca_positions')
-      .insert({ user_id: userId, ticker: '', weight: 0, sort_order: positions.length })
+      .insert({ user_id: userId, account_id: accountId, ticker: '', weight: 0, sort_order: sameAccount.length })
       .select()
       .single()
     if (data) setPositions((prev) => [...prev, data])
@@ -244,9 +261,9 @@ function Dashboard({ session }) {
     await supabase.from('ca_positions').delete().eq('id', id)
   }
 
-  async function clearAll() {
-    const ids = positions.map((p) => p.id)
-    setPositions([])
+  async function clearAccountPositions(accountId) {
+    const ids = positions.filter((p) => p.account_id === accountId).map((p) => p.id)
+    setPositions((prev) => prev.filter((p) => p.account_id !== accountId))
     if (ids.length) await supabase.from('ca_positions').delete().in('id', ids)
   }
 
@@ -279,9 +296,142 @@ function Dashboard({ session }) {
     }
   }
 
-  // --- derived allocation math ---
+  const positionsByAccount = useMemo(() => {
+    const map = {}
+    positions.forEach((p) => {
+      if (!map[p.account_id]) map[p.account_id] = []
+      map[p.account_id].push(p)
+    })
+    return map
+  }, [positions])
+
+  const totalCash = accounts.reduce((s, a) => s + (parseFloat(a.cash_balance) || 0), 0)
+  const allocatableCash = accounts.filter((a) => a.allocate).reduce((s, a) => s + (parseFloat(a.cash_balance) || 0), 0)
+
+  const checkingSavings = accounts.filter((a) => a.account_type === 'checking' || a.account_type === 'savings')
+  const other = accounts.filter((a) => a.account_type !== 'checking' && a.account_type !== 'savings')
+
+  if (!loaded) return null
+
+  return (
+    <div className="wrap">
+      <div className="masthead">
+        <div>
+          <h1>Cash Allocation</h1>
+          <div className="sub">Deploy cash across target positions by weight, per account</div>
+        </div>
+        <div className="actions">
+          <span className="who">{session.user.email}</span>
+          <button className="btn ghost small" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        </div>
+      </div>
+
+      <div className="cash-card">
+        <div>
+          <div className="cash-label">Total cash across accounts</div>
+          <div className="cash-input-row">
+            <span className="cash-total-figure">{fmtMoney(totalCash)}</span>
+          </div>
+        </div>
+        <div className="headline-stats">
+          <div className="stat"><div className="n">{fmtMoney(allocatableCash)}</div><div className="l">Allocatable</div></div>
+          <div className="stat"><div className="n">{fmtMoney(totalCash - allocatableCash)}</div><div className="l">Held, not allocated</div></div>
+          <div className="stat"><div className="n">{accounts.filter((a) => a.allocate).length}</div><div className="l">Active tables</div></div>
+        </div>
+      </div>
+
+      <div className="live-bar">
+        <div className="live-left">
+          <span className={`live-dot ${refreshing ? 'loading' : lastRefreshed ? 'ok' : ''}`} />
+          <span>
+            {refreshing
+              ? 'Fetching current quotes…'
+              : lastRefreshed
+                ? `Prices updated ${formatRelativeTime(lastRefreshed)}`
+                : 'Prices not yet fetched'}
+          </span>
+        </div>
+        <button className="btn primary small" onClick={refreshNow} disabled={refreshing || cooldownRemaining > 0}>
+          {refreshing ? 'Refreshing…' : cooldownRemaining > 0 ? `Wait ${cooldownRemaining}s` : 'Refresh prices'}
+        </button>
+      </div>
+      {refreshMsg && <div className="warn-banner">{refreshMsg}</div>}
+
+      <div className="section-label">
+        <span>Accounts</span>
+        <label className="frac-toggle">
+          <input type="checkbox" checked={fractional} onChange={(e) => onFractionalToggle(e.target.checked)} />
+          Allow fractional shares (applies to every account)
+        </label>
+      </div>
+
+      {checkingSavings.length > 0 && (
+        <>
+          <div className="acct-group-label">Checking &amp; savings — visible, not allocated</div>
+          <div className="acct-list">
+            {checkingSavings.map((a) => (
+              <AccountBlock
+                key={a.id}
+                account={a}
+                positions={positionsByAccount[a.id] || []}
+                prices={prices}
+                fractional={fractional}
+                onCashChange={onAccountCashChange}
+                onAllocateToggle={onAccountAllocateToggle}
+                onUpdatePosition={updatePositionLocal}
+                onAddPosition={addPosition}
+                onDeletePosition={deletePosition}
+                onClearPositions={clearAccountPositions}
+              />
+            ))}
+          </div>
+        </>
+      )}
+
+      {other.length > 0 && (
+        <>
+          <div className="acct-group-label">Investment &amp; retirement</div>
+          <div className="acct-list">
+            {other.map((a) => (
+              <AccountBlock
+                key={a.id}
+                account={a}
+                positions={positionsByAccount[a.id] || []}
+                prices={prices}
+                fractional={fractional}
+                onCashChange={onAccountCashChange}
+                onAllocateToggle={onAccountAllocateToggle}
+                onUpdatePosition={updatePositionLocal}
+                onAddPosition={addPosition}
+                onDeletePosition={deletePosition}
+                onClearPositions={clearAccountPositions}
+              />
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="footnote">
+        <b>On cash balances:</b> each account's cash is whatever was last synced from Kubera (see "synced" timestamp on
+        the account), or a manual edit if you've typed one in since. There's no automatic background sync — ask Claude
+        to "sync cash from Kubera" and it'll pull current balances and write them straight in. <b>On the allocate
+        checkbox:</b> only checked accounts render an allocation table below; unchecked accounts (like checking/savings)
+        still show their cash for visibility. <b>On prices:</b> "Refresh prices" calls a Supabase Edge Function that
+        fetches current quotes from Finnhub for every ticker across every account's table — no API key ever touches the
+        browser. <b>On weights:</b> weight % is applied against that account's own cash balance; if weights sum to less
+        than 100%, the remainder shows as idle cash for that account.
+      </div>
+    </div>
+  )
+}
+
+function AccountBlock({
+  account, positions, prices, fractional,
+  onCashChange, onAllocateToggle, onUpdatePosition, onAddPosition, onDeletePosition, onClearPositions,
+}) {
+  const cash = parseFloat(account.cash_balance) || 0
+
   const rows = useMemo(() => {
-    const cash = parseFloat(cashBalance) || 0
     return positions.map((p, i) => {
       const priceRow = prices[(p.ticker || '').toUpperCase()]
       const price = priceRow?.price ?? 0
@@ -308,9 +458,8 @@ function Dashboard({ session }) {
         color: PALETTE[i % PALETTE.length],
       }
     })
-  }, [positions, prices, cashBalance, fractional])
+  }, [positions, prices, cash, fractional])
 
-  const cash = parseFloat(cashBalance) || 0
   const totalWeight = rows.reduce((s, r) => s + r.weight, 0)
   const totalSpent = rows.reduce((s, r) => s + r.spent, 0)
   const totalShares = rows.reduce((s, r) => s + r.shares, 0)
@@ -320,152 +469,118 @@ function Dashboard({ session }) {
   const idleCash = overAllocated ? 0 : cash * (idleWeight / 100)
   const totalCashRemaining = idleCash + Math.max(0, totalLeftover)
 
-  if (!loaded) return null
-
   return (
-    <div className="wrap">
-      <div className="masthead">
-        <div>
-          <h1>Cash Allocation</h1>
-          <div className="sub">Deploy a cash balance across target positions by weight</div>
+    <div className="acct-card">
+      <div className="acct-head">
+        <div className="acct-head-left">
+          <span className={`acct-badge acct-badge-${account.account_type}`}>{ACCOUNT_TYPE_LABEL[account.account_type] || 'Other'}</span>
+          <span className="acct-name">{account.name}</span>
+          {account.synced_at && <span className="acct-synced">synced {formatRelativeTime(account.synced_at)}</span>}
         </div>
-        <div className="actions">
-          <span className="who">{session.user.email}</span>
-          <button className="btn ghost small" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        <div className="acct-head-right">
+          <div className="acct-cash-input-row">
+            <span className="prefix">$</span>
+            <input value={account.cash_balance} onChange={(e) => onCashChange(account.id, e.target.value)} inputMode="decimal" />
+          </div>
+          <label className="acct-allocate-toggle">
+            <input
+              type="checkbox"
+              checked={!!account.allocate}
+              onChange={(e) => onAllocateToggle(account.id, e.target.checked)}
+            />
+            Allocate
+          </label>
         </div>
       </div>
 
-      <div className="cash-card">
-        <div>
-          <div className="cash-label">Cash to allocate</div>
-          <div className="cash-input-row">
-            <span className="prefix">$</span>
-            <input value={cashBalance} onChange={(e) => onCashChange(e.target.value)} inputMode="decimal" />
+      {account.allocate && (
+        <div className="acct-body">
+          {overAllocated && (
+            <div className="warn-banner">
+              Weights total {totalWeight.toFixed(1)}% — that's {(totalWeight - 100).toFixed(1)} points over this
+              account's cash. Reduce a weight before this allocates cleanly.
+            </div>
+          )}
+
+          <div className="strip-wrap">
+            <div className="strip">
+              {overAllocated
+                ? rows.map((r) => (
+                    <div key={r.id} className="strip-seg" style={{ width: `${(r.weight * 100) / totalWeight}%`, background: r.color }}>
+                      <span>{r.ticker || '—'} {r.weight.toFixed(0)}%</span>
+                    </div>
+                  ))
+                : (
+                  <>
+                    {rows.filter((r) => r.weight > 0).map((r) => (
+                      <div key={r.id} className="strip-seg" style={{ width: `${r.weight}%`, background: r.color }}>
+                        <span>{r.ticker || '—'} {r.weight.toFixed(0)}%</span>
+                      </div>
+                    ))}
+                    {idleWeight > 0.01 && (
+                      <div className="strip-seg idle" style={{ width: `${idleWeight}%` }}>
+                        <span>Idle {idleWeight.toFixed(0)}%</span>
+                      </div>
+                    )}
+                  </>
+                )}
+            </div>
+          </div>
+
+          <div className="tbl">
+            <div className="row head">
+              <span></span><span>Ticker</span><span>Last price</span><span>Weight</span>
+              <span>$ Allocated</span><span>Shares</span><span>$ Spent / Idle</span><span></span>
+            </div>
+            <div>
+              {rows.map((r) => (
+                <div className="row" key={r.id}>
+                  <span className="swatch" style={{ background: r.color }} />
+                  <input
+                    className="ticker-input"
+                    value={r.ticker || ''}
+                    maxLength={6}
+                    placeholder="TICK"
+                    onChange={(e) => onUpdatePosition(r.id, 'ticker', e.target.value)}
+                  />
+                  <span className="cell-value dim">
+                    {r.price ? fmtMoney(r.price, true) : r.priceError ? 'error' : '—'}
+                  </span>
+                  <span className="pct-wrap">
+                    <input
+                      value={r.weight || ''}
+                      inputMode="decimal"
+                      placeholder="0"
+                      onChange={(e) => onUpdatePosition(r.id, 'weight', e.target.value)}
+                    />
+                  </span>
+                  <span className="cell-value">{fmtMoney(r.dollarAlloc)}</span>
+                  <span className="cell-value">
+                    {fractional ? r.shares.toLocaleString('en-US', { maximumFractionDigits: 4 }) : r.shares.toLocaleString('en-US')}
+                  </span>
+                  <span className="cell-value dim">
+                    {fmtMoney(r.spent)}
+                    {r.leftover > 0.005 && <span style={{ color: 'var(--amber)' }}> (+{fmtMoney(r.leftover, true)})</span>}
+                  </span>
+                  <button className="del-btn" onClick={() => onDeletePosition(r.id)} title="Remove">×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="add-row">
+            <button className="btn" onClick={() => onAddPosition(account.id)}>+ Add position</button>
+            <button className="btn ghost" onClick={() => onClearPositions(account.id)}>Clear all</button>
+          </div>
+
+          <div className="summary">
+            <div className="cell"><div className="n">{fmtMoney(totalSpent)}</div><div className="l">Deployed</div></div>
+            <div className="cell"><div className="n">{totalShares.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div><div className="l">Total shares</div></div>
+            <div className="cell"><div className="n">{fmtMoney(totalLeftover, true)}</div><div className="l">Rounding remainder</div></div>
+            <div className="cell"><div className="n">{fmtMoney(totalCashRemaining, true)}</div><div className="l">Cash remaining</div></div>
           </div>
         </div>
-        <div className="headline-stats">
-          <div className="stat deployed"><div className="n">{fmtMoney(totalSpent)}</div><div className="l">Deployed</div></div>
-          <div className="stat idle"><div className="n">{fmtMoney(idleCash + totalLeftover)}</div><div className="l">Idle cash</div></div>
-          <div className="stat"><div className="n" style={{ color: overAllocated ? 'var(--coral)' : 'var(--ink)' }}>{totalWeight.toFixed(1).replace(/\.0$/, '')}%</div><div className="l">Weight used</div></div>
-        </div>
-      </div>
-
-      {overAllocated && (
-        <div className="warn-banner">
-          Weights total {totalWeight.toFixed(1)}% — that's {(totalWeight - 100).toFixed(1)} points over your cash balance. Reduce a weight before this allocates cleanly.
-        </div>
       )}
-
-      <div className="live-bar">
-        <div className="live-left">
-          <span className={`live-dot ${refreshing ? 'loading' : lastRefreshed ? 'ok' : ''}`} />
-          <span>
-            {refreshing
-              ? 'Fetching current quotes…'
-              : lastRefreshed
-                ? `Updated ${formatRelativeTime(lastRefreshed)}`
-                : 'Prices not yet fetched'}
-          </span>
-        </div>
-        <button className="btn primary small" onClick={refreshNow} disabled={refreshing || cooldownRemaining > 0}>
-          {refreshing ? 'Refreshing…' : cooldownRemaining > 0 ? `Wait ${cooldownRemaining}s` : 'Refresh prices'}
-        </button>
-      </div>
-      {refreshMsg && <div className="warn-banner">{refreshMsg}</div>}
-
-      <div className="strip-wrap">
-        <div className="strip-label">
-          <span>Allocation</span>
-          <span>{Math.min(totalWeight, 100).toFixed(0)}% of cash assigned</span>
-        </div>
-        <div className="strip">
-          {overAllocated
-            ? rows.map((r, i) => (
-                <div key={r.id} className="strip-seg" style={{ width: `${(r.weight * 100) / totalWeight}%`, background: r.color }}>
-                  <span>{r.ticker || '—'} {r.weight.toFixed(0)}%</span>
-                </div>
-              ))
-            : (
-              <>
-                {rows.filter((r) => r.weight > 0).map((r) => (
-                  <div key={r.id} className="strip-seg" style={{ width: `${r.weight}%`, background: r.color }}>
-                    <span>{r.ticker || '—'} {r.weight.toFixed(0)}%</span>
-                  </div>
-                ))}
-                {idleWeight > 0.01 && (
-                  <div className="strip-seg idle" style={{ width: `${idleWeight}%` }}>
-                    <span>Idle {idleWeight.toFixed(0)}%</span>
-                  </div>
-                )}
-              </>
-            )}
-        </div>
-      </div>
-
-      <div className="section-label">
-        <span>Positions</span>
-        <label className="frac-toggle">
-          <input type="checkbox" checked={fractional} onChange={(e) => onFractionalToggle(e.target.checked)} />
-          Allow fractional shares
-        </label>
-      </div>
-
-      <div className="tbl">
-        <div className="row head">
-          <span></span><span>Ticker</span><span>Last price</span><span>Weight</span>
-          <span>$ Allocated</span><span>Shares</span><span>$ Spent / Idle</span><span></span>
-        </div>
-        <div>
-          {rows.map((r) => (
-            <div className="row" key={r.id}>
-              <span className="swatch" style={{ background: r.color }} />
-              <input
-                className="ticker-input"
-                value={r.ticker || ''}
-                maxLength={6}
-                placeholder="TICK"
-                onChange={(e) => updatePositionLocal(r.id, 'ticker', e.target.value)}
-              />
-              <span className="cell-value dim">
-                {r.price ? fmtMoney(r.price, true) : r.priceError ? 'error' : '—'}
-              </span>
-              <span className="pct-wrap">
-                <input
-                  value={r.weight || ''}
-                  inputMode="decimal"
-                  placeholder="0"
-                  onChange={(e) => updatePositionLocal(r.id, 'weight', e.target.value)}
-                />
-              </span>
-              <span className="cell-value">{fmtMoney(r.dollarAlloc)}</span>
-              <span className="cell-value">
-                {fractional ? r.shares.toLocaleString('en-US', { maximumFractionDigits: 4 }) : r.shares.toLocaleString('en-US')}
-              </span>
-              <span className="cell-value dim">
-                {fmtMoney(r.spent)}
-                {r.leftover > 0.005 && <span style={{ color: 'var(--amber)' }}> (+{fmtMoney(r.leftover, true)})</span>}
-              </span>
-              <button className="del-btn" onClick={() => deletePosition(r.id)} title="Remove">×</button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="add-row">
-        <button className="btn" onClick={addPosition}>+ Add position</button>
-        <button className="btn ghost" onClick={clearAll}>Clear all</button>
-      </div>
-
-      <div className="summary">
-        <div className="cell"><div className="n">{fmtMoney(totalSpent)}</div><div className="l">Total spent</div></div>
-        <div className="cell"><div className="n">{totalShares.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div><div className="l">Total shares</div></div>
-        <div className="cell"><div className="n">{fmtMoney(totalLeftover, true)}</div><div className="l">Rounding remainder</div></div>
-        <div className="cell"><div className="n">{fmtMoney(totalCashRemaining, true)}</div><div className="l">Total cash remaining</div></div>
-      </div>
-
-      <div className="footnote">
-        <b>On prices:</b> "Refresh prices" calls a Supabase Edge Function that fetches current quotes from Finnhub for every ticker below — no API key ever touches the browser. A scheduled job also runs this automatically in the background (see README for the cron setup). <b>On weights:</b> weight % is applied directly against your total cash balance; if weights sum to less than 100%, the remainder shows as idle cash. Whole-share allocation rounds down and leaves a small remainder per position unless fractional shares are enabled.
-      </div>
     </div>
   )
 }
