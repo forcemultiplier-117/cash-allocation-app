@@ -127,6 +127,7 @@ function Dashboard({ session }) {
   const [lastRefreshed, setLastRefreshed] = useState(null)
   const [cooldownUntil, setCooldownUntil] = useState(0)
   const [cooldownTick, setCooldownTick] = useState(0)
+  const [loadError, setLoadError] = useState('')
 
   // Re-render once a second while a cooldown is active so the button's
   // disabled state and label clear on their own when it expires.
@@ -160,13 +161,13 @@ function Dashboard({ session }) {
         settings = created
       }
 
-      const { data: acctRows } = await supabase
+      const { data: acctRows, error: acctError } = await supabase
         .from('ca_accounts')
         .select('*')
         .eq('user_id', userId)
         .order('sort_order', { ascending: true })
 
-      const { data: posRows } = await supabase
+      const { data: posRows, error: posError } = await supabase
         .from('ca_positions')
         .select('*')
         .eq('user_id', userId)
@@ -180,6 +181,12 @@ function Dashboard({ session }) {
       }
 
       if (cancelled) return
+      if (acctError || posError) {
+        const parts = []
+        if (acctError) parts.push(`ca_accounts: ${acctError.message} (code ${acctError.code || '?'})`)
+        if (posError) parts.push(`ca_positions: ${posError.message} (code ${posError.code || '?'})`)
+        setLoadError(parts.join(' | '))
+      }
       setFractional(!!settings.fractional_shares)
       setAccounts((acctRows || []).map((a) => ({ ...a, cash_balance: String(a.cash_balance ?? 0) })))
       setPositions(posRows || [])
@@ -325,6 +332,8 @@ function Dashboard({ session }) {
           <button className="btn ghost small" onClick={() => supabase.auth.signOut()}>Sign out</button>
         </div>
       </div>
+
+      {loadError && <div className="warn-banner">Failed to load data — {loadError}</div>}
 
       <div className="cash-card">
         <div>
