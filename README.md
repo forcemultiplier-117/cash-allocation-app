@@ -156,13 +156,48 @@ environment variables (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) in the
 Vercel project settings. Build command and output directory are Vite's
 defaults — no extra config needed.
 
+## 10. Multi-account allocation
+
+Cash and positions are tracked per **account** (`ca_accounts`), not as one
+flat balance for the whole user. Each account has its own cash balance and
+an `allocate` checkbox:
+
+- **Unchecked** (default for checking/savings) — the account and its cash
+  balance are visible in the list, but no allocation table renders. Useful
+  for accounts you never want to deploy into tickers but still want to see.
+- **Checked** (default for brokerage/retirement accounts) — the account
+  gets its own independent allocation table below it, using the same
+  weight/price/shares math as before, scoped to that account's cash only.
+
+`ca_positions` belongs to a specific account via `account_id`, so multiple
+accounts can each run their own ticker list and weights at once instead of
+one-at-a-time.
+
+**Cash sync:** there's no public Kubera API this app can call on its own,
+so balances don't refresh automatically in the background the way prices
+do. The realistic workflow is: ask Claude (in a session with both this
+repo and a Kubera connection available) to "sync cash from Kubera" — it
+pulls current balances and writes them straight into `ca_accounts` via
+direct Supabase access, matching accounts by their stored `external_id`
+(the Kubera custodian id). Each account's `synced_at` timestamp shows when
+that last happened; you can also just edit an account's cash balance by
+hand between syncs.
+
+**Adding a new account:** insert a row into `ca_accounts` (name,
+`account_type`, `cash_balance`, `allocate`, and optionally `external_id` if
+you want future syncs to find it) — there's no in-app "add account" button
+yet, since accounts map to real-world custodian accounts rather than
+being freely created ad hoc.
+
 ## Notes
 
 - Whole-share allocation rounds down by default; toggle "allow fractional
-  shares" in the app if you don't need whole-lot precision.
-- Weight % is applied directly against your cash balance — weights don't
-  have to sum to 100%; anything under that shows as idle cash. Anything over
-  100% is flagged rather than silently allowed.
+  shares" in the app if you don't need whole-lot precision — it applies
+  across every account.
+- Weight % is applied against each account's own cash balance — weights
+  don't have to sum to 100% per account; anything under that shows as idle
+  cash for that account. Anything over 100% is flagged rather than
+  silently allowed.
 - `ca_prices` is a single shared cache keyed by ticker — if you ever add a
   second user, they benefit from the same refreshed quotes rather than
   doubling API calls.

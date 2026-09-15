@@ -48,6 +48,7 @@ body{
   background:transparent;border:none;color:var(--ink);width:220px;outline:none;
 }
 .cash-input-row input:focus{color:var(--teal);}
+.cash-total-figure{font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:500;color:var(--ink);}
 
 .headline-stats{display:flex;gap:28px;flex-wrap:wrap;}
 .stat{text-align:right;}
@@ -115,6 +116,35 @@ body{
 
 .footnote{font-size:12px;color:var(--muted-2);line-height:1.6;border-top:1px solid var(--hair);padding-top:16px;margin-top:8px;}
 .footnote b{color:var(--muted);}
+
+/* accounts */
+.acct-group-label{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin:22px 2px 10px;}
+.acct-list{display:flex;flex-direction:column;gap:12px;margin-bottom:8px;}
+.acct-card{background:var(--panel);border:1px solid var(--hair);border-radius:var(--radius);overflow:hidden;}
+.acct-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:16px 18px;}
+.acct-head-left{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.acct-name{font-weight:600;font-size:14px;}
+.acct-synced{font-size:11px;color:var(--muted-2);font-family:'IBM Plex Mono',monospace;}
+.acct-badge{font-size:10px;text-transform:uppercase;letter-spacing:0.05em;padding:3px 8px;border-radius:5px;font-weight:600;background:var(--panel-2);color:var(--muted);border:1px solid var(--hair);}
+.acct-badge-brokerage{color:var(--teal);border-color:var(--teal-dim);}
+.acct-badge-checking{color:var(--muted);}
+.acct-badge-savings{color:var(--muted);}
+.acct-head-right{display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
+.acct-cash-input-row{display:flex;align-items:baseline;gap:1px;}
+.acct-cash-input-row .prefix{font-family:'IBM Plex Mono',monospace;font-size:16px;color:var(--muted);}
+.acct-cash-input-row input{font-family:'IBM Plex Mono',monospace;font-size:16px;font-weight:600;background:transparent;border:none;color:var(--ink);width:120px;outline:none;}
+.acct-cash-input-row input:focus{color:var(--teal);}
+.acct-allocate-toggle{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;}
+.acct-allocate-toggle input{accent-color:var(--teal);width:14px;height:14px;}
+.acct-body{padding:0 18px 18px;border-top:1px solid var(--hair);padding-top:16px;}
+.acct-body .strip-wrap{margin-bottom:16px;}
+.acct-body .tbl{margin-bottom:10px;}
+.acct-body .summary{margin-bottom:0;}
+
+@media (max-width:640px){
+  .acct-head{flex-direction:column;align-items:flex-start;}
+  .acct-head-right{width:100%;justify-content:space-between;}
+}
 
 /* auth screen */
 .auth-wrap{max-width:360px;margin:120px auto;padding:0 20px;}
